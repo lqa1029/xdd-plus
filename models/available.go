@@ -6,7 +6,6 @@ import (
 	"github.com/beego/beego/v2/client/httplib"
 	"github.com/beego/beego/v2/core/logs"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -122,64 +121,97 @@ type UserInfoResult struct {
 
 func initCookie() {
 	cks := GetJdCookies()
-	l := len(cks)
-	for i := 0; i < l-1; i++ {
+	//l := len(cks)
+	for i := range cks {
+		time.Sleep(time.Second * time.Duration(60))
 		if cks[i].Available == True && !CookieOK(&cks[i]) {
-			if pt_key, err := cks[i].OutPool(); err == nil && pt_key != "" {
-				i--
-			}
+			logs.Info("开始禁用")
+			cks[i].OutPool()
 		}
 	}
+	//for i := 0; i < l-1; i++ {
+	//	if cks[i].Available == True && !CookieOK(&cks[i]) {
+	//		if pt_key, err := cks[i].OutPool(); err == nil && pt_key != "" {
+	//			i = i - 1
+	//			logs.Info("正常操作")
+	//			logs.Info(cks[i].PtPin)
+	//			logs.Info(i)
+	//		}
+	//	}
+	//}
 	go func() {
 		Save <- &JdCookie{}
 	}()
+}
+
+func cleanCookie() {
+	cks := GetJdCookies()
+	(&JdCookie{}).Push("开始清理过期账号")
+	xx := 0
+	for i := range cks {
+		if cks[i].Available == False {
+			xx++
+			cks[i].Removes(cks[i])
+		}
+	}
+	(&JdCookie{}).Push(fmt.Sprintf("所有CK清理，共%d个", xx))
+}
+
+func cleanWck() {
+	cks := GetJdCookies()
+	xx := 0
+	(&JdCookie{}).Push("开始清空Wskey")
+	for i := range cks {
+		if len(cks[i].WsKey) > 0 {
+			ck := cks[i]
+			ck.Update(WsKey, "")
+			xx++
+		}
+	}
+	(&JdCookie{}).Push(fmt.Sprintf("已清理WCK，一共%d", xx))
 }
 
 func updateCookie() {
 	cks := GetJdCookies()
 	l := len(cks)
 	logs.Info(l)
+	xx := 0
+	yy := 0
+	(&JdCookie{}).Push("开始定时更新转换Wskey")
 	for i := range cks {
 		if len(cks[i].WsKey) > 0 {
 			time.Sleep(10 * time.Second)
 			ck := cks[i]
 			//JdCookie{}.Push(fmt.Sprintf("更新账号账号，%s", ck.Nickname))
 			var pinky = fmt.Sprintf("pin=%s;wskey=%s;", ck.PtPin, ck.WsKey)
-			rsp := cmd(fmt.Sprintf(`python3 test.py "%s"`, pinky), &Sender{})
-			if strings.Contains(rsp, "错误") {
+			rsp, err := getKey(pinky)
+			if err != nil {
+				logs.Error(err)
+			}
+			if strings.Contains(rsp, "fake") {
 				ck.Push(fmt.Sprintf("Wskey失效账号，%s", ck.PtPin))
 				(&JdCookie{}).Push(fmt.Sprintf("Wskey失效，%s", ck.PtPin))
 			} else {
-				ss := regexp.MustCompile(`pt_key=([^;=\s]+);pt_pin=([^;=\s]+)`).FindAllStringSubmatch(rsp, -1)
-				if len(ss) > 0 {
-					xyb := 0
-					for _, s := range ss {
-						ck := JdCookie{
-							PtKey: s[1],
-							PtPin: s[2],
-						}
-						if CookieOK(&ck) {
-							xyb++
-							if HasKey(ck.PtKey) {
-								(&JdCookie{}).Push(fmt.Sprintf("重复提交"))
-							} else {
-								if nck, err := GetJdCookie(ck.PtPin); err == nil {
-									nck.InPool(ck.PtKey)
-									msg := fmt.Sprintf("定时更新账号，%s", ck.PtPin)
-									(&JdCookie{}).Push(msg)
-									logs.Info(msg)
-								} else {
-									NewJdCookie(&ck)
-									msg := fmt.Sprintf("添加账号，账号名:%s", ck.PtPin)
-									logs.Info(msg)
-								}
-							}
-						} else {
-							(&JdCookie{}).Push(fmt.Sprintf("无效CK转换失败，%s", ck.PtPin))
-						}
+				ptKey := FetchJdCookieValue("pt_key", rsp)
+				ptPin := FetchJdCookieValue("pt_pin", rsp)
+				ck := JdCookie{
+					PtKey: ptKey,
+					PtPin: ptPin,
+				}
+				if ptPin != "" || ptKey != "" {
+					if nck, err := GetJdCookie(ck.PtPin); err == nil {
+						xx++
+						nck.InPool(ck.PtKey)
+						nck.Update(Available, True)
+						//msg := fmt.Sprintf("定时更新账号，%s", ck.PtPin)
+						////不再发送成功提醒
+						//(&JdCookie{}).Push(msg)
+						//logs.Info(msg)
+					} else {
+						yy++
+						ck.Update(Available, False)
+						(&JdCookie{}).Push(fmt.Sprintf("查无匹配得ptpin，%s", ck.PtPin))
 					}
-				} else {
-					(&JdCookie{}).Push(fmt.Sprintf("转换失败，请重新转换，%s", ck.PtPin))
 				}
 				go func() {
 					Save <- &JdCookie{}
@@ -187,7 +219,7 @@ func updateCookie() {
 			}
 		}
 	}
-	(&JdCookie{}).Push(fmt.Sprintf("所有CK转换完成，共%d个", len(cks)))
+	(&JdCookie{}).Push(fmt.Sprintf("所有CK转换完成，共%d个,转换失败个数共%d个", xx, yy))
 }
 
 func CookieOK(ck *JdCookie) bool {
@@ -211,41 +243,109 @@ func CookieOK(ck *JdCookie) bool {
 	}
 	ui := &UserInfoResult{}
 	if nil != json.Unmarshal(data, ui) {
-		return true
-	}
-	switch ui.Retcode {
-	case "1001": //ck.BeanNum
-		if ui.Msg == "not login" {
+		//if !Config.IFC {
+		//	(&JdCookie{}).Push("第一个接口失效，切换到第二个接口，可能黑IP，会导致NickName获取失败，可能会自行恢复。")
+		//	Config.IFC = true
+		//}
+		b2 := av2(cookie)
+		if b2 == false {
 			if ck.Available == True {
-				ck.Push(fmt.Sprintf("失效账号，%s", ck.PtPin))
-				//临时使用别人代码
-				JdCookie{}.Push(fmt.Sprintf("失效账号，%s", ck.Nickname))
-				if len(ck.WsKey) > 0 {
-					var pinky = fmt.Sprintf("pin=%s;wskey=%s;", ck.PtPin, ck.WsKey)
-					msg1 := cmd(fmt.Sprintf(`python3 test.py "%s"`, pinky), &Sender{})
-					JdCookie{}.Push(fmt.Sprintf("自动转换wskey---%s", msg1))
-					ss := regexp.MustCompile(`pt_key=([^;=\s]+);pt_pin=([^;=\s]+)`).FindAllStringSubmatch(msg1, -1)
-					if len(ss) > 0 {
-						for _, s := range ss {
+				ck.Update(Available, False)
+				logs.Info(ck.Available)
+				if Config.Wskey {
+					if len(ck.WsKey) > 0 {
+						var pinky = fmt.Sprintf("pin=%s;wskey=%s;", ck.PtPin, ck.WsKey)
+						msg, err := getKey(pinky)
+						if err != nil {
+							logs.Error(err)
+						}
+						//JdCookie{}.Push(fmt.Sprintf("自动转换wskey---%s", msg))
+						//缺少错误判断
+						if strings.Contains(msg, "错误") {
+							ck.Push(fmt.Sprintf("Wskey失效账号，%s", ck.PtPin))
+							(&JdCookie{}).Push(fmt.Sprintf("Wskey失效，%s", ck.PtPin))
+						} else {
+							ptKey := FetchJdCookieValue("pt_key", msg)
+							ptPin := FetchJdCookieValue("pt_pin", msg)
+							logs.Info(ptPin)
 							ck := JdCookie{
-								PtKey: s[1],
-								PtPin: s[2],
+								PtKey: ptKey,
+								PtPin: ptPin,
 							}
-							if nck, err := GetJdCookie(ck.PtPin); err == nil {
+							if nck, err := GetJdCookie(ptPin); err == nil {
 								nck.InPool(ck.PtKey)
 								msg := fmt.Sprintf("更新账号，%s", ck.PtPin)
 								(&JdCookie{}).Push(msg)
 								logs.Info(msg)
 							} else {
-								if Cdle {
-									ck.Hack = True
-								}
-								(&JdCookie{}).Push("转换失败")
+								//nck.Update(Available, False)
+								(&JdCookie{}).Push(fmt.Sprintf("转换失败，%s", nck.PtPin))
 							}
 						}
 
-						return false
+					} else {
+						ck.Push(fmt.Sprintf("失效账号，%s", ck.PtPin))
+						JdCookie{}.Push(fmt.Sprintf("失效账号，%s", ck.Nickname))
 					}
+				} else {
+					ck.Push(fmt.Sprintf("失效账号，%s", ck.PtPin))
+					JdCookie{}.Push(fmt.Sprintf("失效账号，%s", ck.Nickname))
+				}
+
+			}
+			return false
+		} else {
+			return true
+		}
+	}
+	//if Config.IFC {
+	//	(&JdCookie{}).Push("第一个接口恢复，切换回第一接口，恭喜你IP洗白白了")
+	//	Config.IFC = false
+	//}
+	switch ui.Retcode {
+	case "1001": //ck.BeanNum
+		if ui.Msg == "not login" {
+			if ck.Available == True {
+				ck.Update(Available, False)
+				logs.Info(ck.Available)
+				if Config.Wskey {
+					if len(ck.WsKey) > 0 {
+						var pinky = fmt.Sprintf("pin=%s;wskey=%s;", ck.PtPin, ck.WsKey)
+						msg, err := getKey(pinky)
+						if err != nil {
+							logs.Error(err)
+						}
+						//JdCookie{}.Push(fmt.Sprintf("自动转换wskey---%s", msg))
+						//缺少错误判断
+						if strings.Contains(msg, "错误") {
+							ck.Push(fmt.Sprintf("Wskey失效账号，%s", ck.PtPin))
+							(&JdCookie{}).Push(fmt.Sprintf("Wskey失效，%s", ck.PtPin))
+						} else {
+							ptKey := FetchJdCookieValue("pt_key", msg)
+							ptPin := FetchJdCookieValue("pt_pin", msg)
+							logs.Info(ptPin)
+							ck := JdCookie{
+								PtKey: ptKey,
+								PtPin: ptPin,
+							}
+							if nck, err := GetJdCookie(ptPin); err == nil {
+								nck.InPool(ck.PtKey)
+								msg := fmt.Sprintf("更新账号，%s", ck.PtPin)
+								(&JdCookie{}).Push(msg)
+								logs.Info(msg)
+							} else {
+								//nck.Update(Available, False)
+								(&JdCookie{}).Push(fmt.Sprintf("转换失败，%s", nck.PtPin))
+							}
+						}
+
+					} else {
+						ck.Push(fmt.Sprintf("失效账号，%s", ck.PtPin))
+						JdCookie{}.Push(fmt.Sprintf("失效账号，%s", ck.Nickname))
+					}
+				} else {
+					ck.Push(fmt.Sprintf("失效账号，%s", ck.PtPin))
+					JdCookie{}.Push(fmt.Sprintf("失效账号，%s", ck.Nickname))
 				}
 
 			}
@@ -270,6 +370,7 @@ func CookieOK(ck *JdCookie) bool {
 		}
 		return true
 	}
+	//(&JdCookie{}).Push("第一个接口失效，切换到第二个接口，可能黑IP")
 	return av2(cookie)
 }
 
@@ -285,6 +386,17 @@ func av2(cookie string) bool {
 	req.Header("Cookie", cookie)
 	data, err := req.String()
 	if err != nil {
+		return true
+	}
+	if strings.Contains(data, "login") {
+		return false
+	} else if strings.Contains(data, "nickname") {
+		return true
+	} else {
+		if !Config.IFC {
+			(&JdCookie{}).Push("全部接口都失效，现已无法检测，可能黑IP，会导致NickName获取失败，可能会自行恢复。")
+			Config.IFC = true
+		}
 		return true
 	}
 	return !strings.Contains(data, "login")

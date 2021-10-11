@@ -19,6 +19,7 @@ var SendQQ = func(a int64, b interface{}) {
 var SendQQGroup = func(a int64, b int64, c interface{}) {
 
 }
+
 var ListenQQPrivateMessage = func(uid int64, msg string) {
 	SendQQ(uid, handleMessage(msg, "qq", int(uid)))
 }
@@ -34,6 +35,10 @@ var ListenQQGroupMessage = func(gid int64, uid int64, msg string) {
 }
 
 var replies = map[string]string{}
+
+func AggQQ() {
+
+}
 
 func InitReplies() {
 	f, err := os.Open(ExecPath + "/conf/reply.php")
@@ -71,11 +76,11 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 	if sender.UserID == Config.TelegramUserID || sender.UserID == int(Config.QQID) {
 		sender.IsAdmin = true
 	}
-	logs.Info(sender.UserID)
-	if IsUserAdmin(strconv.Itoa(sender.UserID)) {
-		sender.IsAdmin = true
+	if sender.IsAdmin == false {
+		if IsUserAdmin(strconv.Itoa(sender.UserID)) {
+			sender.IsAdmin = true
+		}
 	}
-
 	for i := range codeSignals {
 		for j := range codeSignals[i].Command {
 			if codeSignals[i].Command[j] == head {
@@ -90,29 +95,42 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 	}
 	switch msg {
 	default:
+		{ //沃邮箱
+			ss := regexp.MustCompile(`https://nyan.mail.*3D`).FindStringSubmatch(msg)
+			if len(ss) > 0 {
+				var u User
+				if db.Where("number = ?", sender.UserID).First(&u).Error != nil {
+					return 0
+				}
+				db.Model(u).Updates(map[string]interface{}{
+					"womail": ss[0],
+				})
+				sender.Reply(fmt.Sprintf("沃邮箱提交成功!"))
+				return nil
+			}
+		}
 		{
-			if strings.Contains(msg, "wskey=") {
-				rsp := cmd(fmt.Sprintf(`python3 test.py "%s"`, msg), &Sender{})
-				logs.Info(rsp)
-				ss1 := regexp.MustCompile(`pin=([^;=\s]+);wskey=([^;=\s]+)`).FindAllStringSubmatch(msg, -1)
-				if strings.Contains(rsp, "错误") {
-					logs.Error("wskey错误")
-					sender.Reply(fmt.Sprintf("wskey错误"))
-				} else {
-
-					if len(ss1) > 0 {
-						for _, s := range ss1 {
-							ck := JdCookie{
-								PtPin: s[1],
-								PtKey: rsp,
-								WsKey: s[2],
-							}
-
-							ss := regexp.MustCompile(`pt_key=([^;=\s]+);pt_pin=([^;=\s]+)`).FindAllStringSubmatch(rsp, -1)
-							for _, s1 := range ss {
-								ck.PtPin = s1[2]
-								ck.PtKey = s1[1]
-							}
+			ss := regexp.MustCompile(`pin=([^;=\s]+);wskey=([^;=\s]+)`).FindAllStringSubmatch(msg, -1)
+			if len(ss) > 0 {
+				for _, s := range ss {
+					wkey := "pin=" + s[1] + ";wskey=" + s[2] + ";"
+					//rsp := cmd(fmt.Sprintf(`python3 test.py "%s"`, wkey), &Sender{})
+					rsp, err := getKey(wkey)
+					if err != nil {
+						logs.Error(err)
+					}
+					if strings.Contains(rsp, "错误") {
+						logs.Error("wskey错误")
+						sender.Reply(fmt.Sprintf("wskey错误"))
+					} else {
+						ptKey := FetchJdCookieValue("pt_key", rsp)
+						ptPin := FetchJdCookieValue("pt_pin", rsp)
+						ck := JdCookie{
+							PtPin: ptPin,
+							PtKey: ptKey,
+							WsKey: s[2],
+						}
+						if CookieOK(&ck) {
 
 							if sender.IsQQ() {
 								ck.QQ = sender.UserID
@@ -122,13 +140,10 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 							if nck, err := GetJdCookie(ck.PtPin); err == nil {
 								nck.InPool(ck.PtKey)
 								if nck.WsKey == "" || len(nck.WsKey) == 0 {
-									nck.Updates(JdCookie{
-										WsKey: ck.WsKey,
-									})
 									if sender.IsQQ() {
 										ck.Update(QQ, ck.QQ)
 									}
-									nck.Update(PtKey, ck.PtKey)
+									nck.Update(WsKey, ck.WsKey)
 									msg := fmt.Sprintf("写入WsKey，并更新账号%s", ck.PtPin)
 									sender.Reply(fmt.Sprintf(msg))
 									(&JdCookie{}).Push(msg)
@@ -149,16 +164,20 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 										logs.Info(msg)
 									}
 								}
+
 							} else {
 								NewJdCookie(&ck)
-								msg := fmt.Sprintf("添加账号，用户名：%s", ck.PtPin)
+
+								msg := fmt.Sprintf("添加账号，账号名:%s", ck.PtPin)
+
 								if sender.IsQQ() {
 									ck.Update(QQ, ck.QQ)
 								}
-								sender.Reply(fmt.Sprintf(msg))
-								logs.Info(msg)
-							}
 
+								sender.Reply(fmt.Sprintf(msg))
+								sender.Reply(ck.Query())
+								(&JdCookie{}).Push(msg)
+							}
 						}
 						go func() {
 							Save <- &JdCookie{}
@@ -166,7 +185,6 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 						return nil
 					}
 				}
-
 			}
 		}
 		{ //tyt
@@ -174,31 +192,31 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 			if len(ss) > 0 {
 				if !sender.IsAdmin {
 					coin := GetCoin(sender.UserID)
-					if coin < 8 {
-						return "推一推需要8个许愿币。"
+					if coin < Config.Tyt {
+						return fmt.Sprintf("推一推需要%d个互助值", Config.Tyt)
 					}
 					RemCoin(sender.UserID, 8)
-					sender.Reply("推一推即将开始，已扣除8个许愿币。")
+					sender.Reply(fmt.Sprintf("推一推即将开始，已扣除%d个互助值", Config.Tyt))
+				} else {
+					sender.Reply(fmt.Sprintf("推一推即将开始，已扣除%d个互助值，管理员通道", Config.Tyt))
 				}
+
 				runTask(&Task{Path: "jd_tyt.js", Envs: []Env{
 					{Name: "tytpacketId", Value: ss[1]},
 				}}, sender)
 				return nil
 			}
 		}
-		{ //
-			ss := regexp.MustCompile(`pt_key=([^;=\s]+);pt_pin=([^;=\s]+)`).FindAllStringSubmatch(msg, -1)
-
-			if len(ss) > 0 {
-
-				xyb := 0
-				for _, s := range ss {
+		{
+			if strings.Contains(msg, "pt_key") {
+				ptKey := FetchJdCookieValue("pt_key", msg)
+				ptPin := FetchJdCookieValue("pt_pin", msg)
+				if len(ptPin) > 0 && len(ptKey) > 0 {
 					ck := JdCookie{
-						PtKey: s[1],
-						PtPin: s[2],
+						PtKey: ptKey,
+						PtPin: ptPin,
 					}
 					if CookieOK(&ck) {
-						xyb++
 						if sender.IsQQ() {
 							ck.QQ = sender.UserID
 						} else if sender.IsTG() {
@@ -226,11 +244,13 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 									ck.Update(QQ, ck.QQ)
 								}
 								sender.Reply(fmt.Sprintf(msg))
+								sender.Reply(ck.Query())
+								(&JdCookie{}).Push(msg)
 								logs.Info(msg)
 							}
 						}
 					} else {
-						sender.Reply(fmt.Sprintf("无效，东币-1，余额%d", RemCoin(sender.UserID, 1)))
+						sender.Reply(fmt.Sprintf("无效"))
 					}
 				}
 				go func() {
@@ -271,4 +291,13 @@ var handleMessage = func(msgs ...interface{}) interface{} {
 		}
 	}
 	return nil
+}
+
+func FetchJdCookieValue(key string, cookies string) string {
+	match := regexp.MustCompile(key + `=([^;]*);{0,1}`).FindStringSubmatch(cookies)
+	if len(match) == 2 {
+		return match[1]
+	} else {
+		return ""
+	}
 }

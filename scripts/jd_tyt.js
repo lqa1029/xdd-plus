@@ -97,13 +97,16 @@ function tythelp() {
                 data = JSON.parse(data);
 
                 if (data.code == 0) {
-                    console.log("帮砍：" + data.data.amount)
+                    // console.log("帮砍：" + data.data.amount)
 
                 } else if (data.msg.indexOf("完成") != -1) {
                     console.log("已完成砍价")
                     status = 1
                 } else {
-                    console.log(data.msg)
+                    // if (data.msg !== "need verify"){
+                    //     console.log(data.msg)
+                    // }
+                    // console.log(data.msg)
                 }
             } catch (e) {
                 $.logErr(e, resp);
